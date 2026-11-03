@@ -1,0 +1,79 @@
+
+```{r}
+library(terra) # raster handling
+library(tidyverse)
+library(sf)
+library(tmap) # map making
+library(kableExtra) # table formatting
+library(spData) # spatial data
+library(spDataLarge) # spatial data
+library(geodata) # spatial data
+```
+
+
+```{r}
+# Read in the data
+wc <- st_read('data/wc_regions_clean.shp')
+sst_2008 <- rast('data/average_annual_sst_2008.tif')
+sst_2009 <- rast('data/average_annual_sst_2009.tif')
+sst_2010 <- rast('data/average_annual_sst_2010.tif')
+sst_2011 <- rast('data/average_annual_sst_2011.tif')
+sst_2012 <- rast('data/average_annual_sst_2012.tif')
+depth <- rast('data/depth.tif')
+```
+
+```{r}
+# Compare SpatRaster geometries
+compareGeom(sst_2008, sst_2009, sst_2010, sst_2011, sst_2012, ext = TRUE, res = TRUE, crs = TRUE)
+
+# Stack the rasters
+sst <- c(sst_2008, sst_2009, sst_2010, sst_2011, sst_2012)
+plot(sst) # Check stack worked
+```
+
+
+```{r}
+# Double check all dataframe's CRS match
+if((st_crs(wc) == st_crs(sst)) & (st_crs(sst) == st_crs(depth))){
+  print("It's a match")
+} else {
+  warning("Coordinate refrence systems do not match") # Include a warning if the dataframes don't have matching CRS
+}
+```
+
+
+```{r}
+# Mean SST from 2008-2012
+mean_sst <- app(sst, fun = mean)
+
+# Convert average SST from Kelvin to Celsius
+mean_sst_c <- mean_sst - 273.15
+```
+
+
+```{r}
+# Crop depth raster to match the extent of the SST raster
+depth_crop <- crop(depth, mean_sst_c)
+
+# Check if it worked
+cat("\n=== Resolution comparison ===\n")
+cat("Original depth:", dim(depth), "\n")
+cat("Depth cropped:", dim(depth_crop), "\n")
+```
+
+
+```{r}
+# The resolutions of the SST and depth data do not match
+res(depth)
+res(mean_sst_c)
+
+# Resample the depth data to match the resolution of the SST data using the bilinear method approach
+depth_resampled <- resample(depth, mean_sst_c, method = "bilinear")
+
+# Double check that everything matches
+cat("After resampling depth:\n")
+cat("Resolutions match:", all(res(mean_sst_c) == res(depth_resampled)), "\n")
+cat("Origins match:    ", all(round(origin(mean_sst_c), 8) == round(origin(depth_resampled), 8)), "\n")
+cat("Extents match:    ", ext(mean_sst_c) == ext(depth_resampled), "\n")
+cat("CRS match:        ", same.crs(mean_sst_c, depth_resampled), "\n")
+```
