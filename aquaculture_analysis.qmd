@@ -1,15 +1,19 @@
+---
+title: "EDS 223 HW 3: Prioritizing potential aquaculture"
+author: "Emalia Partlow"
+warning: false
+---
 
 ```{r}
-library(terra) # raster handling
+library(terra) 
 library(tidyverse)
 library(sf)
-library(tmap) # map making
-library(kableExtra) # table formatting
-library(spData) # spatial data
-library(spDataLarge) # spatial data
-library(geodata) # spatial data
+library(tmap) 
+library(kableExtra) 
+library(spData) 
+library(spDataLarge) 
+library(geodata)
 ```
-
 
 ```{r}
 # Read in the data
@@ -31,49 +35,212 @@ sst <- c(sst_2008, sst_2009, sst_2010, sst_2011, sst_2012)
 plot(sst) # Check stack worked
 ```
 
-
 ```{r}
-# Double check all dataframe's CRS match
-if((st_crs(wc) == st_crs(sst)) & (st_crs(sst) == st_crs(depth))){
+# Check if all dataframe's CRS match
+if((st_crs(wc) == crs(sst)) & (crs(sst) == crs(depth))){
   print("It's a match")
 } else {
-  warning("Coordinate refrence systems do not match") # Include a warning if the dataframes don't have matching CRS
+  warning("Coordinate refrence systems do not match")
 }
 ```
 
+```{r}
+# Reproject depth to match sst CRS
+depth_reprojected <- project(depth, sst)
+
+# Reproject wc to match sst CRS
+wc_reprojected <- st_transform(wc, crs(sst))
+```
 
 ```{r}
-# Mean SST from 2008-2012
-mean_sst <- app(sst, fun = mean)
+# Double check all dataframe's CRS match
+if((crs(wc_reprojected) == crs(sst)) & (crs(sst) == crs(depth_reprojected))){
+  print("It's a match")
+} else {
+  warning("Coordinate refrence systems still do not match")
+}
+```
+
+```{r}
+# Take the mean SST from 2008-2012
+mean_sst <- app(sst, fun = mean, na.rm = TRUE)
 
 # Convert average SST from Kelvin to Celsius
 mean_sst_c <- mean_sst - 273.15
 ```
 
+Note: Did not need to manually crop or resample because project() did that
 
 ```{r}
-# Crop depth raster to match the extent of the SST raster
-depth_crop <- crop(depth, mean_sst_c)
-
-# Check if it worked
-cat("\n=== Resolution comparison ===\n")
-cat("Original depth:", dim(depth), "\n")
-cat("Depth cropped:", dim(depth_crop), "\n")
-```
-
-
-```{r}
-# The resolutions of the SST and depth data do not match
-res(depth)
-res(mean_sst_c)
-
-# Resample the depth data to match the resolution of the SST data using the bilinear method approach
-depth_resampled <- resample(depth, mean_sst_c, method = "bilinear")
-
 # Double check that everything matches
-cat("After resampling depth:\n")
-cat("Resolutions match:", all(res(mean_sst_c) == res(depth_resampled)), "\n")
-cat("Origins match:    ", all(round(origin(mean_sst_c), 8) == round(origin(depth_resampled), 8)), "\n")
-cat("Extents match:    ", ext(mean_sst_c) == ext(depth_resampled), "\n")
-cat("CRS match:        ", same.crs(mean_sst_c, depth_resampled), "\n")
+cat("Resolutions match:", all(res(mean_sst_c) == res(depth_reprojected)), "\n")
+cat("Origins match:    ", all(round(origin(mean_sst_c), 8) == round(origin(depth_reprojected), 8)), "\n")
+cat("Extents match:    ", ext(mean_sst_c) == ext(depth_reprojected), "\n")
+cat("CRS match:        ", crs(mean_sst_c) == crs(depth_reprojected), "\n")
+cat("Dimensions match:  ", all(dim(mean_sst_c) == dim(depth_reprojected)), "\n")
+
+# Stack rasters
+sst_depth <- c(mean_sst_c, depth_reprojected)
+plot(sst_depth)
 ```
+
+```{r}
+# Reclassify SST and depth data into locations that are suitable for oysters
+rcl_depth <- matrix(c(
+   -Inf, -70, 0, # Not suitable
+   -70, 0, 1, # Suitable
+   0, Inf, 0 # Not suitable
+), ncol = 3, byrow = TRUE)
+
+rcl_sst <- matrix(c(
+   -Inf, 11, 0, # Not suitable
+   11, 30, 1, # Suitable
+   30, Inf, 0 # Not suitable
+), ncol = 3, byrow = TRUE)
+
+depth_zones <- classify(depth_reprojected, rcl = rcl_depth)
+sst_zones <- classify(mean_sst_c, rcl = rcl_sst)
+
+# Stack rasters
+suitable_zones <- c(sst_zones, depth_zones)
+plot(suitable_zones)
+```
+
+```{r}
+# Locations that satisfy both SST and depth conditions
+best_zone <- lapp(suitable_zones, fun = function(s, d) s * d)
+names(best_zone) <- "suitable_sst_depth"
+
+plot(best_zone)
+```
+
+```{r}
+# Convert EEZ regions to raster cells
+eez_raster <- rasterize(wc_reprojected, best_zone, field = 'rgn_id')
+
+# Find area of cells
+area <- cellSize(best_zone, unit = 'km', mask = TRUE)
+
+# Select suitable depth and sst zone cells within West Coast EEZs
+eez_masked <- mask(area, best_zone, maskvalue = 0) # Convert 0 values to NA
+plot(eez_masked)
+
+# Summarize cell size variation across the extent
+zonal_area <- zonal(eez_masked, eez_raster, fun = "sum", na.rm = TRUE)
+```
+
+```{r}
+#| label: eez_suitable_area
+#| tbl-cap: "Suitable area for marine aquaculture within each West Coast EEZ"
+
+kable(zonal_area,
+      col.names = c("EEZ", "Suitable area (km)"),
+      digits    = 1
+      ) |>
+        kable_styling(bootstrap_options = "striped")
+```
+
+```{r}
+# Join suitable area onto original vector eez data frame 
+map <- left_join(wc_reprojected, zonal_area, by ='rgn_id')
+```
+
+```{r}
+# Create a map of EEZ regions colored by amount of suitable area
+tm_shape(map) +
+  tm_basemap('OpenStreetMap') +
+  tm_polygons(
+      fill = 'area', # Fill polygons based on suitable area
+      fill.legend = tm_legend(title = 'Suitable area (km)',
+                              position = tm_pos_out('right', 'center')) 
+    ) +
+tm_compass(position = c('right', 'top')) +
+tm_scalebar(position = c('left', 'bottom')) +
+tm_title('Suitable oyster aquaculture area within each EEZ') +
+tm_legend(position = tm_pos_out('right', 'center'))
+```
+
+The oyster map displays that the central California EEZ has the highest amount of suitable area for oyster aquacultre. The northern California EEZ has the least amount of suitable area.
+
+```{r}
+# Create a function of the workflow that can be applied to different species
+suitable_aquaculture_eez <- function(species, sst_min, sst_max, depth_min, depth_max) {
+
+  # Stack sst rasters
+  sst <- c(sst_2008, sst_2009, sst_2010, sst_2011, sst_2012)
+
+  # Reproject depth to match sst CRS
+  depth_reprojected <- project(depth, sst)
+
+  # Reproject wc to match sst CRS
+  wc_reprojected <- st_transform(wc, crs(sst))
+
+  # Take the mean SST from 2008-2012
+  mean_sst <- app(sst, fun = mean, na.rm = TRUE)
+
+  # Convert average SST from Kelvin to Celsius
+  mean_sst_c <- mean_sst - 273.15
+
+  # Stack depth and sst rasters
+  sst_depth <- c(mean_sst_c, depth_reprojected)
+
+  # Reclassify SST and depth data into locations that are suitable for the species
+  rcl_depth <- matrix(c(
+    -Inf, depth_min, 0, # Not suitable
+    depth_min, depth_max, 1, # Suitable
+    depth_max, Inf, 0 # Not suitable
+  ), ncol = 3, byrow = TRUE)
+
+  rcl_sst <- matrix(c(
+    -Inf, sst_min, 0, # Not suitable
+    sst_min, sst_max, 1, # Suitable
+    sst_max, Inf, 0 # Not suitable
+  ), ncol = 3, byrow = TRUE)
+
+  # Apply zone classification
+  depth_zones <- classify(depth_reprojected, rcl = rcl_depth)
+  sst_zones <- classify(mean_sst_c, rcl = rcl_sst)
+
+  # Stack classified rasters
+  suitable_zones <- c(sst_zones, depth_zones)
+
+  # Calculate locations that satisfy both SST and depth conditions
+  best_zone <- lapp(suitable_zones, fun = function(s, d) s * d)
+  names(best_zone) <- "suitable_sst_depth"
+
+  # Convert EEZ regions to raster cells
+  eez_raster <- rasterize(wc_reprojected, best_zone, field = 'rgn_id')
+
+  # Find area of cells
+  area <- cellSize(best_zone, unit = 'km', mask = TRUE)
+
+  # Select suitable depth and sst zone cells within West Coast EEZs
+  eez_masked <- mask(area, best_zone, maskvalue = 0)
+
+  # Summarize cell size variation across the extent
+  zonal_area <- zonal(eez_masked, eez_raster, fun = "sum", na.rm = TRUE)
+
+  # Join suitable area onto original vector eez data frame 
+  map <- left_join(wc_reprojected, zonal_area, by ='rgn_id')
+
+  # Create a map of EEZ regions colored by amount of suitable area
+  aquaculture_map <- tm_shape(map) +
+                      tm_basemap('OpenStreetMap') +
+                      tm_polygons(
+                          fill = 'area', # Fill polygons based on suitable area
+                          fill.legend = tm_legend(title = 'Suitable area (km)',
+                                                  position = tm_pos_out('right', 'center')) 
+                        ) +
+                    tm_compass(position = c('right', 'top')) +
+                    tm_scalebar(position = c('left', 'bottom')) +
+                    tm_title(paste('Suitable', species, 'aquaculture area within each EEZ')) +
+                    tm_legend(position = tm_pos_out('right', 'center'))
+
+  return(aquaculture_map)
+}
+```
+```{r}
+suitable_aquaculture_eez(species = 'red abalone', sst_min = 10, sst_max = 18, depth_min = 6, depth_max = 40)
+```
+
+The red abalone map displays that the Washington EEZ has the highest amount of suitable aquaculture area. The northern California EEZ has the least amount of suitable area.
